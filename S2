@@ -1,0 +1,7 @@
+echo "# S2rHubByKhay" >> README.md
+git init
+git add README.md
+git commit -m "first commit"
+git branch -M main
+git remote add origin https://github.com/preexmon-collab/S2rHubByKhay.git
+git push -u origin main
