@@ -29,11 +29,14 @@ local DODGE_PICK_DELAY = 0.35
 local MAX_ATTEMPTS = 3
 
 local function safeRequire(getter) local ok, r = pcall(function() return require(getter()) end) return ok and r or nil end
-local networkingFolder = ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Networking")
+local packagesFolder = ReplicatedStorage:WaitForChild("Packages", 10)
+local networkingFolder = packagesFolder and packagesFolder:WaitForChild("Networking", 10) or nil
 local EggState = safeRequire(function() return ReplicatedStorage.Client.EggState end)
 local Assets   = safeRequire(function() return ReplicatedStorage.Data.Assets end)
 local Mutations= safeRequire(function() return ReplicatedStorage.Shared.Modules.Mutations end)
-local function remote(name) return networkingFolder:FindFirstChild(name) end
+local function remote(name)
+    return networkingFolder and networkingFolder:FindFirstChild(name) or nil
+end
 local function root() local c = localPlayer.Character return c and c:FindFirstChild("HumanoidRootPart") end
 local function humanoid() local c = localPlayer.Character return c and c:FindFirstChildOfClass("Humanoid") end
 
@@ -66,15 +69,31 @@ local c = localPlayer.Character local h = c and c:FindFirstChildOfClass("Humanoi
 if not h or h.Health <= 0 then return end
 if shield.Clone and shield.Clone.Parent == c then return end
 if not grounded(h) then return end
-local clone = h:Clone() h.Parent = nil clone.Parent = c
-workspace.CurrentCamera.CameraSubject = clone
+local cloneOk, clone = pcall(function() return h:Clone() end)
+if not cloneOk or not clone then return end
+local parentOk = pcall(function()
+    h.Parent = nil
+    clone.Parent = c
+end)
+if not parentOk then
+    if h.Parent == nil then pcall(function() h.Parent = c end) end
+    pcall(function() clone:Destroy() end)
+    return
+end
+local camera = workspace.CurrentCamera
+if camera then pcall(function() camera.CameraSubject = clone end) end
 shieldControls(clone) shieldAnimate(c)
 shield.Original = h shield.Clone = clone
 table.insert(shield.Links, h:GetPropertyChangedSignal("WalkSpeed"):Connect(function() if clone.Parent ~= nil then clone.WalkSpeed = h.WalkSpeed end end))
 table.insert(shield.Links, clone.Died:Connect(function()
 shieldUnlink() shield.Original, shield.Clone = nil, nil
 local cur = localPlayer.Character
-if cur and h.Parent == nil then h.Parent = cur workspace.CurrentCamera.CameraSubject = h shieldControls(h) end
+if cur and h.Parent == nil then
+    h.Parent = cur
+    local camera = workspace.CurrentCamera
+    if camera then pcall(function() camera.CameraSubject = h end) end
+    shieldControls(h)
+end
 pcall(function() clone:Destroy() end) h.Health = 0
 end))
 end
@@ -83,22 +102,25 @@ shieldUnlink()
 local c, o, cl = localPlayer.Character, shield.Original, shield.Clone
 shield.Original, shield.Clone = nil, nil
 if o and cl and c and o.Parent == nil and cl.Parent == c then
-o.Parent = c workspace.CurrentCamera.CameraSubject = o shieldControls(o)
+o.Parent = c
+local camera = workspace.CurrentCamera
+if camera then pcall(function() camera.CameraSubject = o end) end
+shieldControls(o)
 pcall(function() cl:Destroy() end) shieldAnimate(c)
 end
 end
 local function shieldStart()
-shieldSwap()
+pcall(shieldSwap)
 local n = 0
 shield.Connection = RunService.Heartbeat:Connect(function(dt)
 n += dt
 local c = localPlayer.Character
 local miss = not (shield.Clone and c and shield.Clone.Parent == c)
-if (miss and 0.25 or 3) <= n then n = 0 shieldSwap() end
+if (miss and 0.25 or 3) <= n then n = 0 pcall(shieldSwap) end
 end)
 shield.Added = localPlayer.CharacterAdded:Connect(function(c)
 shieldUnlink() shield.Original, shield.Clone = nil, nil
-task.spawn(function() c:WaitForChild("Humanoid", 10) task.wait(1) if shield.Connection and localPlayer.Character == c then shieldSwap() end end)
+task.spawn(function() c:WaitForChild("Humanoid", 10) task.wait(1) if shield.Connection and localPlayer.Character == c then pcall(shieldSwap) end end)
 end)
 end
 local function shieldStop()
@@ -108,10 +130,11 @@ shieldUndo()
 end
 
 local alive = true
+local sessionConnections = {}
 local state = { Carrying=false, Uid=nil, Delivered=0, Busy=false, Cancel=false, Mult=1, PulledAt=0, HeldSeen=0, GuessedDrop=false, TripStartCF=nil, IgnoreRagdoll=false }
 local function progress() end
 if type(EggState) == "table" and type(EggState.CarryChanged) == "table" and type(EggState.CarryChanged.Connect) == "function" then
-EggState.CarryChanged:Connect(function(arg)
+table.insert(sessionConnections, EggState.CarryChanged:Connect(function(arg)
 local carrying = type(arg) == "table" and arg.IsCarrying == true
 if carrying and arg.GuardDisabled == true then carrying = false end
 state.GuessedDrop = false
@@ -125,18 +148,25 @@ state.Uid = arg.Uid
 local m = tonumber(arg.SpeedMultiplier) if m and m > 0 then state.Mult = m end
 end
 state.Carrying = carrying
+end))
+end
+pcall(function()
+    local r = remote("RE/EggWorld/FieldEggRedeemVerdict")
+    if r and r.OnClientEvent then
+        table.insert(sessionConnections, r.OnClientEvent:Connect(function() state.Delivered = os.clock() end))
+    end
 end)
-end
-pcall(function() local r = remote("RE/EggWorld/FieldEggRedeemVerdict")
-if r and r.OnClientEvent then r.OnClientEvent:Connect(function() state.Delivered = os.clock() end) end end)
 pcall(function() local r = remote("RE/Alerts/Raise")
-if r and r.OnClientEvent then r.OnClientEvent:Connect(function(arg)
-if type(arg) == "table" and type(arg.Text) == "string" and string.find(string.lower(arg.Text), "delivery failed", 1, true) then
-state.DeliveryFailedAt = os.clock()
-end
-end) end end)
+if r and r.OnClientEvent then
+        table.insert(sessionConnections, r.OnClientEvent:Connect(function(arg)
+            if type(arg) == "table" and type(arg.Text) == "string" and string.find(string.lower(arg.Text), "delivery failed", 1, true) then
+                state.DeliveryFailedAt = os.clock()
+            end
+        end))
+    end
+end)
 pcall(function() local r = remote("RE/RigSync/Refresh")
-if r and r.OnClientEvent then r.OnClientEvent:Connect(function(arg)
+if r and r.OnClientEvent then table.insert(sessionConnections, r.OnClientEvent:Connect(function(arg)
 if state.IgnoreRagdoll then return end
 if type(arg) == "string" then local ok, d = pcall(function() return game:GetService("HttpService"):JSONDecode(arg) end) arg = ok and d or nil end
 if type(arg) ~= "table" then return end
@@ -151,7 +181,7 @@ state.Ragdoll = true state.RagdollAt = os.clock()
 state.RagdollArgs = type(arg.Arguments) == "table" and arg.Arguments or nil
 local r0 = root() if r0 then pcall(function() r0.AssemblyLinearVelocity = Vector3.zero end) end
 elseif arg.Action == "EndRagdoll" then state.Ragdoll = false state.RagdollEnd = os.clock() end
-end) end end)
+end)) end end)
 local function takeEgg(uid) if type(uid) == "string" and type(EggState) == "table" and type(EggState.CarryFieldEgg) == "function" then pcall(EggState.CarryFieldEgg, uid) end end
 local function dropEgg() if type(EggState) == "table" and type(EggState.DropFieldEgg) == "function" then pcall(EggState.DropFieldEgg, "PlayerRequest") end end
 local function promptNear(pos, r)
@@ -231,10 +261,19 @@ end
 return info
 end
 local function money(v)
+v = tonumber(v) or 0
+if v ~= v or v == math.huge or v == -math.huge then v = 0 end
+v = math.max(v, 0)
 for _, u in ipairs({ {1e12,"T"},{1e9,"B"},{1e6,"M"},{1e3,"K"} }) do
 if v >= u[1] then return string.format("$%.2f%s/s", v/u[1], u[2]) end
 end
 return string.format("$%d/s", math.floor(v + 0.5))
+end
+
+local function netPing()
+    local ping = 0.1
+    pcall(function() ping = localPlayer:GetNetworkPing() end)
+    return math.clamp(tonumber(ping) or 0.1, 0, 1)
 end
 
 local status = function() end
@@ -251,29 +290,6 @@ local oldType, frame = cam.CameraType, cam.CFrame
 pcall(function() cam.CameraType = Enum.CameraType.Scriptable cam.CFrame = frame end)
 return function() pcall(function() cam.CameraType = oldType end) end
 end
-local userFps = 240
-pcall(function()
-if typeof(getfpscap) == "function" then local c = tonumber(getfpscap()) if c and (c == 0 or c >= 60) then userFps = c end end
-end)
-local function restoreFps() if typeof(setfpscap) == "function" then pcall(setfpscap, math.clamp(math.floor(userFps), 0, 1000)) end end
-local function dipInterval()
-local ping = 0
-local ok, v = pcall(function() return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue() end)
-if ok then ping = tonumber(v) or 0 end
-return ping <= 200 and 0.2 or math.clamp(ping / 1000, 0.2, 1)
-end
-local function netPing() local p = 0.1 pcall(function() p = localPlayer:GetNetworkPing() end) return math.clamp(tonumber(p) or 0.1, 0, 1) end
-local fpsGen = 0
-local function fpsOn()
-if typeof(setfpscap) ~= "function" then return end
-fpsGen += 1 local mine = fpsGen
-task.spawn(function()
-local high, step, st = true, dipInterval(), os.clock()
-while fpsGen == mine and os.clock() - st < 60 do pcall(setfpscap, high and 50 or 40) high = not high task.wait(step) end
-if fpsGen == mine then restoreFps() end
-end)
-end
-local function fpsOff() fpsGen += 1 restoreFps() end
 local stealClone = nil
 local function dropClone() local c = stealClone stealClone = nil if c then pcall(function() c:Destroy() end) end end
 local function randomName() return string.format("%08x", math.random(0, 2147483647)) end
@@ -1046,9 +1062,7 @@ local semiFrozen = viewState ~= nil
 local releaseCamera = semiFrozen and function() end or frozenCamera()
 state.ReleaseCamera = releaseCamera
 if not semiFrozen then pcall(postClone) end
-fpsOn()
 local okRelay = relayFlow(uid, started, releaseCamera, semiFrozen)
-fpsOff()
 return okRelay
 end
 
@@ -1093,7 +1107,7 @@ end
 delivered = instantTP(uid)
 if not delivered then failReason = state.NestBack and "nest" or "delivery failed" end
 end)
-fpsOff() dropClone()
+dropClone()
 if state.ReleaseCamera then pcall(state.ReleaseCamera) state.ReleaseCamera = nil end
 semi.SlowRun = false semi.AtDrop = false semi.Plain = false
 if state.Died then
@@ -1122,21 +1136,122 @@ end)
 end
 
 local function parentGui()
-if typeof(gethui) == "function" then local ok, r = pcall(gethui) if ok and typeof(r) == "Instance" then return r end end
-return CoreGui
+    if typeof(gethui) == "function" then
+        local ok, result = pcall(gethui)
+        if ok and typeof(result) == "Instance" then return result end
+    end
+    return localPlayer:FindFirstChildOfClass("PlayerGui") or CoreGui
 end
 local function make(class, props) local i = Instance.new(class) for k, v in pairs(props or {}) do i[k] = v end return i end
 local function corner(p, r) make("UICorner", { CornerRadius = UDim.new(0, r or 6) }).Parent = p end
 local function text(p, props) props.BackgroundTransparency = 1 props.TextColor3 = props.TextColor3 or Color3.fromRGB(255, 255, 255) local l = make("TextLabel", props) l.Parent = p return l end
 
+-- Optional local graphics optimization. This is a reversible visual-quality
+-- toggle; it does not change the game's frame-rate cap or gameplay state.
+local Lighting = game:GetService("Lighting")
+local fpsBoostEnabled = false
+local fpsGeneration = 0
+local fpsSaved = {}
+local fpsConnections = {}
+local qualitySettings, originalQuality = nil, nil
+
+local function saveAndSet(instance, property, value)
+    if not instance then return end
+    local ok, original = pcall(function() return instance[property] end)
+    if not ok then return end
+    local saved = fpsSaved[instance]
+    if not saved then
+        saved = {}
+        fpsSaved[instance] = saved
+    end
+    if saved[property] == nil then saved[property] = original end
+    pcall(function() instance[property] = value end)
+end
+
+local function optimizeVisual(instance)
+    if not instance then return end
+    pcall(function()
+        if instance:IsA("BasePart") then
+            saveAndSet(instance, "CastShadow", false)
+        elseif instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam")
+            or instance:IsA("Fire") or instance:IsA("Smoke") or instance:IsA("Sparkles")
+            or instance:IsA("Light") or instance:IsA("PostEffect") then
+            saveAndSet(instance, "Enabled", false)
+        end
+    end)
+end
+
+local function restoreFPSBoost()
+    fpsGeneration += 1
+    for _, connection in ipairs(fpsConnections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(fpsConnections)
+
+    for instance, properties in pairs(fpsSaved) do
+        for property, original in pairs(properties) do
+            pcall(function() instance[property] = original end)
+        end
+    end
+    table.clear(fpsSaved)
+
+    if qualitySettings and originalQuality ~= nil then
+        pcall(function() qualitySettings.QualityLevel = originalQuality end)
+    end
+    qualitySettings, originalQuality = nil, nil
+    fpsBoostEnabled = false
+end
+
+local function setFPSBoost(enabled)
+    enabled = enabled == true
+    if fpsBoostEnabled == enabled then return true end
+
+    if not enabled then
+        restoreFPSBoost()
+        return true
+    end
+
+    fpsBoostEnabled = true
+    fpsGeneration += 1
+    local myGeneration = fpsGeneration
+
+    saveAndSet(Lighting, "GlobalShadows", false)
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then saveAndSet(terrain, "Decoration", false) end
+
+    table.insert(fpsConnections, workspace.DescendantAdded:Connect(optimizeVisual))
+    table.insert(fpsConnections, Lighting.DescendantAdded:Connect(optimizeVisual))
+
+    pcall(function()
+        qualitySettings = settings().Rendering
+        originalQuality = qualitySettings.QualityLevel
+        qualitySettings.QualityLevel = Enum.QualityLevel.Level01
+    end)
+
+    -- Spread the initial scan over several frames to avoid a large one-frame hitch.
+    task.spawn(function()
+        local containers = { workspace, Lighting }
+        for _, container in ipairs(containers) do
+            local descendants = container:GetDescendants()
+            for index, instance in ipairs(descendants) do
+                if not fpsBoostEnabled or fpsGeneration ~= myGeneration then return end
+                optimizeVisual(instance)
+                if index % 250 == 0 then task.wait() end
+            end
+        end
+    end)
+    return true
+end
+
 -- Remove current and legacy GUI instances before creating the new interface.
+local guiParent = parentGui()
 for _, guiName in ipairs({ "S2rHub", "SourcesHub", "quveg_insta" }) do
-    local oldGui = parentGui():FindFirstChild(guiName)
-    if oldGui then oldGui:Destroy() end
+    local oldGui = guiParent:FindFirstChild(guiName)
+    if oldGui then pcall(function() oldGui:Destroy() end) end
 end
 
 local gui = make("ScreenGui", { Name = "S2rHub", DisplayOrder = 200000, ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = true })
-gui.Parent = parentGui()
+gui.Parent = guiParent
 
 local W, H = 240, 130
 local window = make("Frame", { 
@@ -1147,8 +1262,14 @@ local window = make("Frame", {
 })
 window.Parent = gui 
 corner(window, 12)
+local windowStroke = make("UIStroke", {
+    Color = Color3.fromRGB(91, 55, 150),
+    Thickness = 1,
+    Transparency = 0.18
+})
+windowStroke.Parent = window
 
--- Red accent bar at top
+-- Violet accent bar at top
 local accentBar = make("Frame", {
     Size = UDim2.new(1, 0, 0, 3),
     Position = UDim2.fromOffset(0, 0),
@@ -1158,21 +1279,10 @@ local accentBar = make("Frame", {
 accentBar.Parent = window
 corner(accentBar, 0)
 
--- Logo
-local logo = make("ImageLabel", {
-    Size = UDim2.fromOffset(22, 22),
-    Position = UDim2.fromOffset(8, 10),
-    BackgroundTransparency = 1,
-    Image = "rbxassetid://111331179075915",
-    ImageColor3 = Color3.fromRGB(196, 181, 253),
-    ScaleType = Enum.ScaleType.Fit
-})
-logo.Parent = window
-
--- Title
+-- Clean title: the old SourcesHub image asset has been removed completely.
 local titleLabel = text(window, { 
-    Size = UDim2.new(1, -40, 0, 18), 
-    Position = UDim2.fromOffset(34, 8), 
+    Size = UDim2.new(1, -16, 0, 18), 
+    Position = UDim2.fromOffset(8, 8), 
     Font = Enum.Font.GothamBold, 
     TextSize = 11, 
     TextXAlignment = Enum.TextXAlignment.Left, 
@@ -1180,16 +1290,46 @@ local titleLabel = text(window, {
     TextColor3 = Color3.fromRGB(255, 255, 255)
 })
 
--- Discord link
-local discordLabel = text(window, { 
-    Size = UDim2.new(1, -12, 0, 14), 
+local themeLabel = text(window, { 
+    Size = UDim2.fromOffset(145, 14), 
     Position = UDim2.fromOffset(8, 30), 
     Font = Enum.Font.GothamMedium, 
-    TextSize = 10, 
+    TextSize = 8, 
     TextXAlignment = Enum.TextXAlignment.Left, 
     Text = "VIOLET  •  BLACK EDITION",
     TextColor3 = Color3.fromRGB(196, 181, 253)
 })
+
+-- Compact FPS control fits in the existing header; window dimensions stay unchanged.
+local fpsBtn = make("TextButton", {
+    Size = UDim2.fromOffset(78, 16),
+    Position = UDim2.fromOffset(154, 29),
+    BackgroundColor3 = Color3.fromRGB(38, 28, 58),
+    BorderSizePixel = 0,
+    Font = Enum.Font.GothamBold,
+    TextSize = 8,
+    TextColor3 = Color3.fromRGB(216, 202, 255),
+    Text = "FPS BOOST OFF",
+    AutoButtonColor = true
+})
+fpsBtn.Parent = window
+corner(fpsBtn, 5)
+local fpsBtnStroke = make("UIStroke", {
+    Color = Color3.fromRGB(124, 78, 210),
+    Thickness = 0.7,
+    Transparency = 0.35
+})
+fpsBtnStroke.Parent = fpsBtn
+fpsBtn.MouseButton1Click:Connect(function()
+    local requestedState = not fpsBoostEnabled
+    local ok = pcall(setFPSBoost, requestedState)
+    if not ok then
+        warn("S2rHub: FPS graphics toggle could not be applied.")
+    end
+    fpsBtn.Text = fpsBoostEnabled and "FPS BOOST ON" or "FPS BOOST OFF"
+    fpsBtn.BackgroundColor3 = fpsBoostEnabled and Color3.fromRGB(91, 43, 166) or Color3.fromRGB(38, 28, 58)
+    fpsBtn.TextColor3 = fpsBoostEnabled and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(216, 202, 255)
+end)
 
 -- Info card
 local infoCard = make("TextButton", { 
@@ -1202,8 +1342,14 @@ local infoCard = make("TextButton", {
 })
 infoCard.Parent = window 
 corner(infoCard, 8)
+local infoStroke = make("UIStroke", {
+    Color = Color3.fromRGB(83, 55, 126),
+    Thickness = 0.7,
+    Transparency = 0.42
+})
+infoStroke.Parent = infoCard
 
--- Red left border on info card
+-- Violet left border on info card
 local cardAccent = make("Frame", {
     Size = UDim2.new(0, 3, 1, 0),
     Position = UDim2.fromOffset(0, 0),
@@ -1279,6 +1425,7 @@ listScroll.Parent = listWindow
 make("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }).Parent = listScroll
 
 local selectedUid, bestUid, listOpen, manualSelected = nil, nil, false, false
+local renderedListSignature = nil
 infoCard.MouseButton1Click:Connect(function() listOpen = not listOpen listWindow.Visible = listOpen end)
 
 local function updateBestEgg()
@@ -1286,14 +1433,42 @@ local infos = {}
 for _, rec in ipairs(snapshot()) do infos[#infos + 1] = describe(rec) end
 table.sort(infos, function(a, b) return a.Value > b.Value end)
 local best = infos[1]
-if best then
-bestUid = best.Uid
-if not manualSelected then selectedUid = best.Uid nameLabel.Text = best.Name valueLabel.Text = money(best.Value) iconLabel.Image = best.Icon end
+bestUid = best and best.Uid or nil
+
+local selectedInfo = nil
+if manualSelected and selectedUid then
+    for _, info in ipairs(infos) do
+        if info.Uid == selectedUid then selectedInfo = info break end
+    end
+    if not selectedInfo then
+        manualSelected = false
+        selectedUid = nil
+    end
+end
+
+if manualSelected and selectedInfo then
+    nameLabel.Text = selectedInfo.Name
+    valueLabel.Text = money(selectedInfo.Value)
+    iconLabel.Image = selectedInfo.Icon
+elseif best then
+    selectedUid = best.Uid
+    nameLabel.Text = best.Name
+    valueLabel.Text = money(best.Value)
+    iconLabel.Image = best.Icon
 else
-bestUid = nil
-if not manualSelected then selectedUid = nil nameLabel.Text = "No eggs found" valueLabel.Text = "$0/s" iconLabel.Image = "" end
+    selectedUid = nil
+    nameLabel.Text = "No eggs found"
+    valueLabel.Text = "$0/s"
+    iconLabel.Image = ""
 end
 if listOpen then
+local signatureParts = {}
+for _, info in ipairs(infos) do
+    signatureParts[#signatureParts + 1] = table.concat({ tostring(info.Uid), info.Name, tostring(info.Value), info.Icon }, "|")
+end
+local listSignature = table.concat(signatureParts, "\n")
+if listSignature ~= renderedListSignature then
+renderedListSignature = listSignature
 for _, c in ipairs(listScroll:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
 for i, info in ipairs(infos) do
 local row = make("TextButton", { 
@@ -1353,6 +1528,7 @@ end)
 end
 end
 end
+end
 
 task.spawn(function() while gui.Parent do pcall(updateBestEgg) task.wait(1) end end)
 
@@ -1365,7 +1541,7 @@ end)
 
 task.spawn(function()
 while gui.Parent do
-task.wait(0.05)
+task.wait(0.1)
 if state.Busy then
 stealBtn.Text = "Cancel" 
 stealBtn.BackgroundColor3 = Color3.fromRGB(65, 40, 105) 
@@ -1383,24 +1559,49 @@ end
 end
 end)
 
+local dragConnections = {}
 do
 local dragging, startPos, startInput
-window.InputBegan:Connect(function(input)
+table.insert(dragConnections, window.InputBegan:Connect(function(input)
 if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then 
 dragging, startPos, startInput = true, window.Position, input.Position 
 end
-end)
-UserInputService.InputChanged:Connect(function(input)
+end))
+table.insert(dragConnections, UserInputService.InputChanged:Connect(function(input)
 if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 local d = input.Position - startInput
 window.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
 end
-end)
-UserInputService.InputEnded:Connect(function(input)
+end))
+table.insert(dragConnections, UserInputService.InputEnded:Connect(function(input)
 if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then 
 dragging = false 
 end
-end)
+end))
 end
+
+gui.Destroying:Connect(function()
+    alive = false
+    state.Cancel = true
+
+    if fpsBoostEnabled then pcall(setFPSBoost, false) end
+    if viewState then pcall(releaseView) end
+    if state.ReleaseCamera then
+        pcall(state.ReleaseCamera)
+        state.ReleaseCamera = nil
+    end
+    pcall(dropClone)
+    pcall(shieldStop)
+
+    for _, connection in ipairs(sessionConnections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(sessionConnections)
+
+    for _, connection in ipairs(dragConnections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(dragConnections)
+end)
 
 shieldStart()
